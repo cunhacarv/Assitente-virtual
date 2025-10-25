@@ -104,7 +104,16 @@ const App: React.FC = () => {
   
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (event.target.files) {
-      setUploadedFiles(Array.from(event.target.files));
+      const files = Array.from(event.target.files);
+      const pdfFiles = files.filter(file => file.type === 'application/pdf');
+
+      if (pdfFiles.length < files.length) {
+        setError("Apenas arquivos PDF são suportados. Outros tipos de arquivo foram ignorados.");
+      } else {
+        setError(null); // Clear error if all files are valid
+      }
+
+      setUploadedFiles(pdfFiles);
     }
   };
 
@@ -440,9 +449,9 @@ const App: React.FC = () => {
                     <UploadIcon />
                     <span>Anexar Arquivos</span>
                 </label>
-                <input id="file-upload" type="file" multiple accept=".pdf,.doc,.docx" className="hidden" onChange={handleFileChange} disabled={status !== AssistantStatus.IDLE} />
+                <input id="file-upload" type="file" multiple accept=".pdf" className="hidden" onChange={handleFileChange} disabled={status !== AssistantStatus.IDLE} />
                 <div className="flex-grow bg-gray-800/50 rounded-lg p-2 text-xs text-gray-400 overflow-x-auto whitespace-nowrap">
-                    {uploadedFiles.length > 0 ? uploadedFiles.map(f => f.name).join(', ') : 'Nenhum arquivo selecionado'}
+                    {uploadedFiles.length > 0 ? uploadedFiles.map(f => f.name).join(', ') : 'Nenhum arquivo selecionado (somente .pdf)'}
                 </div>
             </div>
             <TextInput 
