@@ -1,0 +1,7 @@
+{
+  "name": "Assistente Virtual PyA",
+  "description": "Um assistente virtual com rosto e voz, especializado em Python, para auxiliar em programação e estudos acadêmicos. Interaja por voz e receba respostas faladas e transcritas em tempo real.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
