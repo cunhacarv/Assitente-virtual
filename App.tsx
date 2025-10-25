@@ -397,6 +397,57 @@ const App: React.FC = () => {
             setError("Não foi possível gerar o PDF. A biblioteca pode não ter sido carregada.");
         }
     };
+    
+    const handleDownloadAssistantResponsePDF = (entry: TranscriptionEntry) => {
+        if (!entry.assistant && !entry.code) {
+          setError("Não há resposta do assistente para baixar.");
+          return;
+        }
+    
+        try {
+          const { jsPDF } = jspdf;
+          const doc = new jsPDF();
+          const margin = 10;
+          const maxWidth = doc.internal.pageSize.getWidth() - margin * 2;
+          let y = margin;
+    
+          const addText = (text: string, size = 12, style = 'normal', color = '#000000') => {
+            if (y > 280) { // Simple page break check
+              doc.addPage();
+              y = margin;
+            }
+            doc.setFont('helvetica', style);
+            doc.setFontSize(size);
+            doc.setTextColor(color);
+            const lines = doc.splitTextToSize(text, maxWidth);
+            doc.text(lines, margin, y);
+            y += (lines.length * (size / 2.5));
+          };
+    
+          addText('Resposta do Assistente', 16, 'bold');
+          y += 10;
+    
+          if (entry.assistant) {
+            addText(entry.assistant);
+            y += 4;
+          }
+          if (entry.code) {
+            addText('Código:', 12, 'bold');
+            y += 2;
+            doc.setFont('courier', 'normal');
+            doc.setFontSize(10);
+            doc.setTextColor('#333333');
+            const codeLines = doc.splitTextToSize(entry.code.content, maxWidth - 5); // smaller width for code
+            doc.text(codeLines, margin + 5, y);
+            y += (codeLines.length * 4);
+          }
+    
+          doc.save('resposta-assistente.pdf');
+        } catch (e) {
+          console.error("Failed to generate single response PDF:", e);
+          setError("Não foi possível gerar o PDF. A biblioteca pode não ter sido carregada.");
+        }
+      };
 
 
   const getButtonState = () => {
@@ -441,6 +492,7 @@ const App: React.FC = () => {
         history={transcriptionHistory}
         currentUserTranscription={currentUserTranscription}
         currentAssistantTranscription={currentAssistantTranscription}
+        onDownloadResponse={handleDownloadAssistantResponsePDF}
       />
       
        <div className="w-full max-w-4xl space-y-2">
