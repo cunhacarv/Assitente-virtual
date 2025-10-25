@@ -1,11 +1,14 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 // Fix: Removed non-exported 'LiveSession' type.
-import { GoogleGenAI, LiveServerMessage, Modality, Chat } from '@google/genai';
+import { GoogleGenAI, LiveServerMessage, Modality, Chat, Part } from '@google/genai';
 import { AssistantStatus, TranscriptionEntry } from './types';
 import { createBlob, decode, decodeAudioData } from './utils/audioUtils';
 import VirtualAssistantAvatar from './components/VirtualAssistantAvatar';
 import TranscriptionDisplay from './components/TranscriptionDisplay';
 import TextInput from './components/TextInput';
+
+// Declare jspdf for TypeScript since it's loaded from a script tag
+declare const jspdf: any;
 
 const App: React.FC = () => {
   const [status, setStatus] = useState<AssistantStatus>(AssistantStatus.IDLE);
@@ -21,6 +24,7 @@ const App: React.FC = () => {
   const [currentUserTranscription, setCurrentUserTranscription] = useState('');
   const [currentAssistantTranscription, setCurrentAssistantTranscription] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
 
   // Fix: Replaced 'LiveSession' with 'any' as the session type is not exported from the SDK.
   const sessionPromiseRef = useRef<Promise<any> | null>(null);
@@ -51,7 +55,7 @@ const App: React.FC = () => {
     chatRef.current = ai.chats.create({
         model: 'gemini-2.5-flash',
         config: {
-            systemInstruction: "Você é um assistente de IA especialista em programação. Seu objetivo é ajudar os usuários a escrever código, resolver problemas e entender conceitos de programação em qualquer linguagem. Ao fornecer código, sempre o envolva em blocos de código Markdown com a identificação da linguagem. Por exemplo: ```javascript\nconsole.log('Olá, Mundo!');\n```. Mantenha as explicações em texto concisas e focadas no código. Responda em português do Brasil.",
+            systemInstruction: "Você é um assistente de IA especialista em programação. Seu objetivo é ajudar os usuários a escrever código, resolver problemas e entender conceitos de programação em qualquer linguagem. Se arquivos forem fornecidos, baseie suas respostas primordialmente no conteúdo desses arquivos. Ao fornecer código, sempre o envolva em blocos de código Markdown com a identificação da linguagem. Por exemplo: ```javascript\nconsole.log('Olá, Mundo!');\n```. Mantenha as explicações em texto concisas e focadas no código. Responda em português do Brasil.",
         },
     });
 
@@ -97,6 +101,26 @@ const App: React.FC = () => {
     }
 
   }, [stopMicrophone]);
+  
+  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (event.target.files) {
+      setUploadedFiles(Array.from(event.target.files));
+    }
+  };
+
+  const fileToGenerativePart = async (file: File) => {
+    const base64EncodedData = await new Promise<string>((resolve) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve((reader.result as string).split(',')[1]);
+      reader.readAsDataURL(file);
+    });
+    return {
+      inlineData: {
+        data: base64EncodedData,
+        mimeType: file.type,
+      },
+    };
+  };
 
   const handleToggleSession = async () => {
     if (status !== AssistantStatus.IDLE) {
@@ -246,25 +270,41 @@ const App: React.FC = () => {
   };
 
   const handleTextSubmit = async (text: string) => {
-    if (!chatRef.current) return;
+    if (!chatRef.current || status !== AssistantStatus.IDLE) return;
     
     setStatus(AssistantStatus.THINKING);
     setError(null);
     
     setTranscriptionHistory(prev => [...prev, { user: text, assistant: '' }]);
-
+    
     try {
-        const responseStream = await chatRef.current.sendMessageStream({ message: text });
-        
-        setStatus(AssistantStatus.SPEAKING); 
+        const messageParts: Part[] = [{ text }];
 
-        for await (const chunk of responseStream) {
-            currentAssistantTranscriptionRef.current += chunk.text;
-            setCurrentAssistantTranscription(currentAssistantTranscriptionRef.current);
+        if (uploadedFiles.length > 0) {
+            for (const file of uploadedFiles) {
+                const filePart = await fileToGenerativePart(file);
+                messageParts.push(filePart);
+            }
         }
         
-        const fullResponse = currentAssistantTranscriptionRef.current;
-
+        const responseStream = await chatRef.current.sendMessageStream({ message: messageParts });
+        
+        setStatus(AssistantStatus.SPEAKING); 
+        
+        let fullResponse = '';
+        for await (const chunk of responseStream) {
+            fullResponse += chunk.text;
+            // Update the last entry in history for streaming effect
+            setTranscriptionHistory(prev => {
+                const newHistory = [...prev];
+                const lastEntry = newHistory[newHistory.length - 1];
+                if (lastEntry) {
+                    lastEntry.assistant = fullResponse;
+                }
+                return newHistory;
+            });
+        }
+        
         const codeRegex = /```(\w+)?\s*\n([\s\S]+?)\n```/;
         const match = fullResponse.match(codeRegex);
 
@@ -292,13 +332,62 @@ const App: React.FC = () => {
     } catch (err) {
         console.error('Text generation error:', err);
         setError('Ocorreu um erro ao gerar a resposta. Por favor, tente novamente.');
-        setTranscriptionHistory(prev => prev.slice(0, -1));
+        setTranscriptionHistory(prev => prev.slice(0, -1)); // Remove the user's prompt on error
     } finally {
-        currentAssistantTranscriptionRef.current = '';
         setCurrentAssistantTranscription('');
+        setUploadedFiles([]);
         setStatus(AssistantStatus.IDLE);
     }
   };
+  
+    const handleDownloadPDF = () => {
+        try {
+            const { jsPDF } = jspdf;
+            const doc = new jsPDF();
+            const margin = 10;
+            const maxWidth = doc.internal.pageSize.getWidth() - margin * 2;
+            let y = margin;
+
+            const addText = (text: string, size = 12, style = 'normal', color = '#000000') => {
+                if (y > 280) { // Simple page break check
+                    doc.addPage();
+                    y = margin;
+                }
+                doc.setFont('helvetica', style);
+                doc.setFontSize(size);
+                doc.setTextColor(color);
+                const lines = doc.splitTextToSize(text, maxWidth);
+                doc.text(lines, margin, y);
+                y += (lines.length * (size / 2.5));
+            };
+
+            addText('Histórico da Conversa - Assistente de Código', 16, 'bold');
+            y += 10;
+
+            transcriptionHistory.forEach(entry => {
+                addText(`Você: ${entry.user}`, 12, 'bold', '#007BFF');
+                y += 2;
+                if (entry.assistant) {
+                  addText(`Assistente: ${entry.assistant}`);
+                  y += 2;
+                }
+                if (entry.code) {
+                    doc.setFont('courier', 'normal');
+                    doc.setFontSize(10);
+                    doc.setTextColor('#333333');
+                    const codeLines = doc.splitTextToSize(entry.code.content, maxWidth - 5); // smaller width for code
+                    doc.text(codeLines, margin + 5, y);
+                    y += (codeLines.length * 4);
+                }
+                y += 8; // Spacing between entries
+            });
+
+            doc.save('historico-conversa.pdf');
+        } catch (e) {
+            console.error("Failed to generate PDF:", e);
+            setError("Não foi possível gerar o PDF. A biblioteca pode não ter sido carregada.");
+        }
+    };
 
 
   const getButtonState = () => {
@@ -318,12 +407,23 @@ const App: React.FC = () => {
   const { text, icon: Icon, bg, animate } = getButtonState();
 
   return (
-    <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center justify-center p-4 space-y-6">
-      <header className="text-center">
-        <h1 className="text-4xl md:text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-green-400">
-          Assistente de Código
-        </h1>
-        <p className="text-gray-400 mt-2">Seu assistente de programação com IA</p>
+    <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center justify-center p-4 space-y-4">
+      <header className="text-center w-full max-w-4xl flex justify-between items-center">
+        <div>
+          <h1 className="text-4xl md:text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-green-400">
+            Assistente de Código
+          </h1>
+          <p className="text-gray-400 mt-2">Seu assistente de programação com IA</p>
+        </div>
+        <button
+          onClick={handleDownloadPDF}
+          disabled={transcriptionHistory.length === 0}
+          className="px-4 py-2 rounded-lg flex items-center space-x-2 text-sm font-semibold bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed transition-colors"
+          title="Baixar conversa em PDF"
+        >
+          <DownloadIcon />
+          <span>PDF</span>
+        </button>
       </header>
 
       <VirtualAssistantAvatar status={status} />
@@ -334,11 +434,23 @@ const App: React.FC = () => {
         currentAssistantTranscription={currentAssistantTranscription}
       />
       
-      <TextInput 
-        onSubmit={handleTextSubmit}
-        disabled={status !== AssistantStatus.IDLE}
-      />
-      
+       <div className="w-full max-w-4xl space-y-2">
+            <div className="flex items-center space-x-4">
+                <label htmlFor="file-upload" className="flex-shrink-0 cursor-pointer px-4 py-2 rounded-lg flex items-center space-x-2 text-sm font-semibold bg-gray-700 hover:bg-gray-600 transition-colors">
+                    <UploadIcon />
+                    <span>Anexar Arquivos</span>
+                </label>
+                <input id="file-upload" type="file" multiple accept=".pdf,.doc,.docx" className="hidden" onChange={handleFileChange} disabled={status !== AssistantStatus.IDLE} />
+                <div className="flex-grow bg-gray-800/50 rounded-lg p-2 text-xs text-gray-400 overflow-x-auto whitespace-nowrap">
+                    {uploadedFiles.length > 0 ? uploadedFiles.map(f => f.name).join(', ') : 'Nenhum arquivo selecionado'}
+                </div>
+            </div>
+            <TextInput 
+              onSubmit={handleTextSubmit}
+              disabled={status !== AssistantStatus.IDLE}
+            />
+       </div>
+
       {error && <p className="text-red-400 bg-red-900/50 px-4 py-2 rounded-md">{error}</p>}
 
       <button
@@ -370,6 +482,11 @@ const LoadingIcon = ({ animate = false }) => (
     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
   </svg>
 );
-
+const DownloadIcon = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+);
+const UploadIcon = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l4-4m0 0L8 8m4-4v12" /></svg>
+);
 
 export default App;
