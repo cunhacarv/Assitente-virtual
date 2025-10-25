@@ -1,4 +1,3 @@
-
 export enum AssistantStatus {
   IDLE,
   LISTENING,
@@ -8,5 +7,9 @@ export enum AssistantStatus {
 
 export interface TranscriptionEntry {
   user: string;
-  assistant: string;
+  assistant: string; // Will hold non-code text
+  code?: {
+    language: string;
+    content: string;
+  };
 }

@@ -1,10 +1,11 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 // Fix: Removed non-exported 'LiveSession' type.
-import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
+import { GoogleGenAI, LiveServerMessage, Modality, Chat } from '@google/genai';
 import { AssistantStatus, TranscriptionEntry } from './types';
 import { createBlob, decode, decodeAudioData } from './utils/audioUtils';
 import VirtualAssistantAvatar from './components/VirtualAssistantAvatar';
 import TranscriptionDisplay from './components/TranscriptionDisplay';
+import TextInput from './components/TextInput';
 
 const App: React.FC = () => {
   const [status, setStatus] = useState<AssistantStatus>(AssistantStatus.IDLE);
@@ -23,6 +24,7 @@ const App: React.FC = () => {
 
   // Fix: Replaced 'LiveSession' with 'any' as the session type is not exported from the SDK.
   const sessionPromiseRef = useRef<Promise<any> | null>(null);
+  const chatRef = useRef<Chat | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const inputAudioContextRef = useRef<AudioContext | null>(null);
   const outputAudioContextRef = useRef<AudioContext | null>(null);
@@ -43,8 +45,16 @@ const App: React.FC = () => {
       console.error("Failed to save transcription history to localStorage", error);
     }
   }, [transcriptionHistory]);
-
+  
   useEffect(() => {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+    chatRef.current = ai.chats.create({
+        model: 'gemini-2.5-flash',
+        config: {
+            systemInstruction: "Você é um assistente de IA especialista em programação. Seu objetivo é ajudar os usuários a escrever código, resolver problemas e entender conceitos de programação em qualquer linguagem. Ao fornecer código, sempre o envolva em blocos de código Markdown com a identificação da linguagem. Por exemplo: ```javascript\nconsole.log('Olá, Mundo!');\n```. Mantenha as explicações em texto concisas e focadas no código. Responda em português do Brasil.",
+        },
+    });
+
     return () => {
       // Cleanup on unmount
       if (sessionPromiseRef.current) {
@@ -177,10 +187,31 @@ const App: React.FC = () => {
              }
 
              if (message.serverContent?.turnComplete) {
-                setTranscriptionHistory(prev => [...prev, {
-                  user: currentUserTranscriptionRef.current,
-                  assistant: currentAssistantTranscriptionRef.current
-                }]);
+                const assistantText = currentAssistantTranscriptionRef.current;
+                const userText = currentUserTranscriptionRef.current;
+                
+                const codeRegex = /```(\w+)?\s*\n([\s\S]+?)\n```/;
+                const match = assistantText.match(codeRegex);
+
+                let newEntry: TranscriptionEntry;
+
+                if (match) {
+                  newEntry = {
+                    user: userText,
+                    assistant: assistantText.replace(codeRegex, '').trim(),
+                    code: {
+                      language: match[1] || 'plaintext',
+                      content: match[2].trim(),
+                    }
+                  };
+                } else {
+                  newEntry = {
+                    user: userText,
+                    assistant: assistantText,
+                  };
+                }
+                
+                setTranscriptionHistory(prev => [...prev, newEntry]);
                 currentUserTranscriptionRef.current = '';
                 currentAssistantTranscriptionRef.current = '';
                 setCurrentUserTranscription('');
@@ -200,7 +231,7 @@ const App: React.FC = () => {
           responseModalities: [Modality.AUDIO],
           inputAudioTranscription: {},
           outputAudioTranscription: {},
-          systemInstruction: "Você é 'PyA', um assistente virtual especialista em programação Python e estudos acadêmicos. Seu objetivo é ajudar os usuários a aprender, resolver problemas de código e entender conceitos complexos de forma clara, amigável e didática. Use analogias e exemplos práticos sempre que possível. Responda em português do Brasil.",
+          systemInstruction: "Você é um assistente de IA especialista em programação. Seu objetivo é ajudar os usuários a escrever código, resolver problemas e entender conceitos de programação em qualquer linguagem. Ao fornecer código, sempre o envolva em blocos de código Markdown com a identificação da linguagem. Por exemplo: ```javascript\nconsole.log('Olá, Mundo!');\n```. Mantenha as explicações em texto concisas e focadas no código. Responda em português do Brasil.",
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } },
           },
@@ -213,6 +244,62 @@ const App: React.FC = () => {
       setStatus(AssistantStatus.IDLE);
     }
   };
+
+  const handleTextSubmit = async (text: string) => {
+    if (!chatRef.current) return;
+    
+    setStatus(AssistantStatus.THINKING);
+    setError(null);
+    
+    setTranscriptionHistory(prev => [...prev, { user: text, assistant: '' }]);
+
+    try {
+        const responseStream = await chatRef.current.sendMessageStream({ message: text });
+        
+        setStatus(AssistantStatus.SPEAKING); 
+
+        for await (const chunk of responseStream) {
+            currentAssistantTranscriptionRef.current += chunk.text;
+            setCurrentAssistantTranscription(currentAssistantTranscriptionRef.current);
+        }
+        
+        const fullResponse = currentAssistantTranscriptionRef.current;
+
+        const codeRegex = /```(\w+)?\s*\n([\s\S]+?)\n```/;
+        const match = fullResponse.match(codeRegex);
+
+        let assistantText = fullResponse;
+        let codeBlock;
+
+        if (match) {
+            assistantText = fullResponse.replace(codeRegex, '').trim();
+            codeBlock = {
+                language: match[1] || 'plaintext',
+                content: match[2].trim(),
+            };
+        }
+        
+        setTranscriptionHistory(prev => {
+            const newHistory = [...prev];
+            const lastEntry = newHistory[newHistory.length - 1];
+            if (lastEntry) {
+                lastEntry.assistant = assistantText;
+                lastEntry.code = codeBlock;
+            }
+            return newHistory;
+        });
+
+    } catch (err) {
+        console.error('Text generation error:', err);
+        setError('Ocorreu um erro ao gerar a resposta. Por favor, tente novamente.');
+        setTranscriptionHistory(prev => prev.slice(0, -1));
+    } finally {
+        currentAssistantTranscriptionRef.current = '';
+        setCurrentAssistantTranscription('');
+        setStatus(AssistantStatus.IDLE);
+    }
+  };
+
 
   const getButtonState = () => {
     switch (status) {
@@ -231,12 +318,12 @@ const App: React.FC = () => {
   const { text, icon: Icon, bg, animate } = getButtonState();
 
   return (
-    <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center justify-center p-4 space-y-8">
+    <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center justify-center p-4 space-y-6">
       <header className="text-center">
         <h1 className="text-4xl md:text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-green-400">
-          Assistente Virtual PyA
+          Assistente de Código
         </h1>
-        <p className="text-gray-400 mt-2">Seu tutor de Python com IA</p>
+        <p className="text-gray-400 mt-2">Seu assistente de programação com IA</p>
       </header>
 
       <VirtualAssistantAvatar status={status} />
@@ -245,6 +332,11 @@ const App: React.FC = () => {
         history={transcriptionHistory}
         currentUserTranscription={currentUserTranscription}
         currentAssistantTranscription={currentAssistantTranscription}
+      />
+      
+      <TextInput 
+        onSubmit={handleTextSubmit}
+        disabled={status !== AssistantStatus.IDLE}
       />
       
       {error && <p className="text-red-400 bg-red-900/50 px-4 py-2 rounded-md">{error}</p>}
